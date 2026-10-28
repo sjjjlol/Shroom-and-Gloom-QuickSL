@@ -2,9 +2,9 @@
 
 [简体中文](README.md) | **English**
 
-An unofficial Windows in-game combat retry plugin for **Shroom and Gloom**. Captures an in-memory snapshot when combat starts; press **F8** during combat to request snapshot restoration and a scene reload without restarting the game process.
+An unofficial Windows in-game retry plugin for **Shroom and Gloom**. Captures live state at combat, exploration, and card reward entry. Press **Esc**, then click **重开 SL** (Retry SL) on the right of the pause menu to restore without restarting the game process. The in-game button currently uses Chinese labels.
 
-> **0.1.0 experimental**: compilation and plugin loading have been verified. End-to-end combat restoration still requires playtesting. This is not a stable release.
+> **0.2.0 experimental**: replaces stale checkpoint copying with live state capture and adds a pause-menu button and reward restoration. Compilation has passed; first-combat placement, reward restoration and repeated retries still require playtesting.
 
 ## Installation
 
@@ -16,16 +16,19 @@ An unofficial Windows in-game combat retry plugin for **Shroom and Gloom**. Capt
 
 ## Usage
 
-Enter combat, make your moves, then press **F8**. The hotkey only responds when the game has focus, combat is active, a snapshot exists, and no scene is loading. Requests have a minimum five-second cooldown.
+Press Esc and click the Retry SL button on the right. Its label identifies the latest captured stage: combat (战斗), exploration (探索), or rewards (奖励选择). It is disabled without a snapshot or during restoration. F8 has been removed.
 
-Snapshots are memory-only and disappear when the game closes. This is not an arbitrary save-state system and cannot undo completed combat. Restoration reuses the game continuation flow; the precise restart position and random outcomes still need playtesting.
+Snapshots are taken before combat triggers, exploration begins, or reward choices open. Restoration rebuilds the scene and reopens the reward UI when needed. Fixed rewards retain their candidates; random rewards use the original offering logic again, with no guarantee that outcomes change.
+
+Snapshots are memory-only, disappear on exit, and are replaced at the next captured stage. This is not an arbitrary save-state system. Unserialized room interactions, statistics and achievements may not roll back. Reward costs, duplicate cards, first-combat restoration and later rooms need verification. Stop testing and report unexpected behavior.
 
 ## Uninstall and troubleshooting
 
 Exit the game and delete `BepInEx/plugins/ShroomQuickSL.dll` to remove this plugin.
 
 - No loading message: check that the IL2CPP x64 loader is installed and the DLL is in the correct directory.
-- F8 does nothing: enter combat after installing, focus the game window, and retry before combat ends.
+- Button disabled: enter combat, exploration, or a reward choice to capture a snapshot, then wait for loading to finish.
+- Failure or timeout: inspect SL errors in the log rather than retrying repeatedly.
 - Incorrect restored state: stop using the plugin and report the game version, encounter, expected and actual results, and relevant logs. Review logs for personal paths before sharing.
 - After game updates: wait for compatibility confirmation; this plugin uses internal game interfaces.
 
