@@ -7,7 +7,7 @@ using UnityEngine.UI;
 using TMPro;
 
 namespace ShroomQuickSL {
-[BepInPlugin("io.github.shroomquicksl", "Shroom Quick SL", "0.4.0")]
+[BepInPlugin("io.github.shroomquicksl", "Shroom Quick SL", "0.4.1")]
 public class Plugin : BasePlugin {
     internal static Plugin Instance;
     internal static Snapshot Current, Restoring;
@@ -17,7 +17,7 @@ public class Plugin : BasePlugin {
         Instance=this;
         new Harmony("io.github.shroomquicksl").PatchAll();
         AddComponent<PauseMenuSL>();
-        Log.LogInfo("Quick SL 0.4.0: native checkpoints only; experimental encounter snapshots removed.");
+        Log.LogInfo("Quick SL 0.4.1: native checkpoints only; service availability guards enabled.");
     }
     internal static V_Player Player() { return UnityEngine.Object.FindObjectOfType<V_Player>(); }
     internal static void Capture(S_SaveManager save, RunSaveData run, string origin) {
@@ -40,13 +40,14 @@ public class Plugin : BasePlugin {
             if(Restoring!=null) return;
             Current=null; Failed=false;
             try {
-                if(__instance.ContinueGame && __instance.SaveDataToLoad!=null)
+                if(__instance.ContinueGame && __instance.SaveDataToLoad!=null && ServiceLocator.HasSystem<S_SaveManager>())
                     Capture(ServiceLocator.GetSystem<S_SaveManager>(),__instance.SaveDataToLoad,"continue game");
             } catch(Exception e) { Instance.Log.LogError(e); }
         }
     }
     internal static void Retry() {
         try {
+            if(!ServiceLocator.HasSystem<S_BootManager>() || !ServiceLocator.HasSystem<S_SaveManager>() || !ServiceLocator.HasSystem<S_PlayerValuesDisplay>()) return;
             var boot=ServiceLocator.GetSystem<S_BootManager>();
             var save=ServiceLocator.GetSystem<S_SaveManager>();
             var p=Player();
@@ -83,7 +84,7 @@ public class PauseMenuSL : MonoBehaviour {
     public PauseMenuSL(IntPtr pointer):base(pointer) {}
     public void Update() {
         try {
-            var display=ServiceLocator.GetSystem<S_PlayerValuesDisplay>();
+            var display=ServiceLocator.HasSystem<S_PlayerValuesDisplay>() ? ServiceLocator.GetSystem<S_PlayerValuesDisplay>() : null;
             if(display!=null && display._pauseMenu!=null && display.PauseMenuIsOpen()) {
                 if(button==null && Time.realtimeSinceStartup>=nextMenuAttempt) {
                     nextMenuAttempt=Time.realtimeSinceStartup+5; CreateButton(display._pauseMenu);
@@ -95,7 +96,7 @@ public class PauseMenuSL : MonoBehaviour {
             }
             if(Plugin.Restoring==null) { readyAt=0; return; }
             if(Time.realtimeSinceStartup>Plugin.Deadline) throw new InvalidOperationException("Native restore timed out; no success assumed");
-            var boot=ServiceLocator.GetSystem<S_BootManager>();
+            var boot=ServiceLocator.HasSystem<S_BootManager>() ? ServiceLocator.GetSystem<S_BootManager>() : null;
             var p=Plugin.Player();
             if(!Plugin.Restoring.LoadObserved || boot==null || boot.BusyLoading || p==null || p.Model==null || p.BusySavingInCheckpoint) {readyAt=0;return;}
             if(readyAt==0) {readyAt=Time.realtimeSinceStartup+1;return;}
