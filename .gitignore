@@ -4,3 +4,4 @@ backups/
 dist/
 *.rsp
 *.log
+diagnostics/

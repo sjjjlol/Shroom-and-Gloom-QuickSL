@@ -5,208 +5,108 @@ using HarmonyLib;
 using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
-using Cards = Il2CppSystem.Collections.Generic.List<GameplayCardData>;
 
 namespace ShroomQuickSL {
-[BepInPlugin("io.github.shroomquicksl", "Shroom Quick SL", "0.3.1")]
+[BepInPlugin("io.github.shroomquicksl", "Shroom Quick SL", "0.4.0")]
 public class Plugin : BasePlugin {
     internal static Plugin Instance;
-    internal static Snapshot Current;
-    internal static Snapshot Restoring;
+    internal static Snapshot Current, Restoring;
     internal static float Deadline;
-    internal static string Status = "尚无 SL 检查点";
+    internal static bool Failed;
     public override void Load() {
-        Instance = this;
+        Instance=this;
         new Harmony("io.github.shroomquicksl").PatchAll();
         AddComponent<PauseMenuSL>();
-        Log.LogInfo("Quick SL 0.3.1 loaded. Open Esc menu to retry; F8 removed.");
+        Log.LogInfo("Quick SL 0.4.0: native checkpoints only; experimental encounter snapshots removed.");
     }
     internal static V_Player Player() { return UnityEngine.Object.FindObjectOfType<V_Player>(); }
-    internal static void Capture(string kind, Reward reward = null) {
-        if (Restoring != null) return;
-        try {
-            var save = ServiceLocator.GetSystem<S_SaveManager>();
-            var p = Player();
-            if (save == null || p == null || p.Model == null || p.Tunnel == null || !save.HasRunInMemory()) return;
-            var run = save.GetRunReadOnlyInMemory().DeepCopy();
-            // Rebuild live state, following V_Player.RunSaveCheckpoint's data builder.
-            run.PlayerState = p.Model.GetSaveState();
-            p.SaveCurrentTunnelPath(run);
-            run.PlayerClassIdentity = p.StartingClass.AuthoredData.Identity;
-            bool invalid;
-            var decks = save.BuildGameplaySaveData(out invalid);
-            if (invalid) throw new InvalidOperationException("Gameplay deck snapshot invalid");
-            run.CombatDeckSave = decks.Item1;
-            run.ExploreDeckSave = decks.Item2;
-            run.ForesightDeckSave = save.BuildForesightSaveData(out invalid);
-            if (invalid) throw new InvalidOperationException("Foresight snapshot invalid");
-            run.SharedProperties = p.SharedProperties.Model.GetSaveData();
-            run.CampPlacements = ServiceLocator.GetSystem<CampManager>().GetSaveData();
-            run.WaitingVeterans = ServiceLocator.GetSystem<S_EnemyEncounterManager>().ExportWaitingVeterans();
-            bool combatReward = reward != null && p.Tunnel.CombatRoomInstance != null && p.Tunnel.CombatRoomInstance.CardRewardChoiceUI != null && p.Tunnel.CombatRoomInstance.CardRewardChoiceUI.name == reward.Name;
-            bool combatFinished = kind != "战斗" && (p.Tunnel.IsCombatComplete() || combatReward);
-            run.LastCheckpoint = combatFinished ? "AfterCombat" : "EnterTunnel";
-            run.SaveInvalidatedDueToError = false;
-            Current = new Snapshot { Run = run.DeepCopy(), Meta = save.GetMetaReadOnlyInMemory().DeepCopy(),
-                Kind = kind, Position = p.Tunnel.transform.InverseTransformPoint(p.transform.position),
-                Rotation = Quaternion.Inverse(p.Tunnel.transform.rotation) * p.transform.rotation,
-                CombatFinished = combatFinished, Reward = reward };
-            Status = "重开 SL · " + kind;
-            Instance.Log.LogInfo("Captured live " + kind + " checkpoint: " + run.CurrentTunnelPath + ", " + run.LastCheckpoint);
-        } catch (Exception e) {
-            Status = Current == null ? "重开 SL" : "重开 SL · " + Current.Kind;
-            Instance.Log.LogError(e);
-        }
-    }
-    // Keep the last valid checkpoint even when a new capture cannot be made.
-    internal static void EnsureCheckpoint(bool replace = false) {
-        if (Restoring != null) return;
-        var save = ServiceLocator.GetSystem<S_SaveManager>();
-        if (save == null || !save.HasRunInMemory()) return;
-        var run = save.GetRunReadOnlyInMemory();
-        if (Current != null && Current.Run.RunStatsId != run.RunStatsId) Current = null;
-        if (!replace && Current != null) return;
-        if (run.SaveInvalidatedDueToError || run.RunComplete) return;
-        Current = new Snapshot { Run = run.DeepCopy(), Meta = save.GetMetaReadOnlyInMemory().DeepCopy(), Kind = "最近存档", NativeCheckpoint = true };
-        Status = "重开 SL";
-        Instance.Log.LogInfo("Native checkpoint captured: " + run.CurrentTunnelPath + ", " + run.LastCheckpoint);
+    internal static void Capture(S_SaveManager save, RunSaveData run, string origin) {
+        if (Restoring != null || run == null || run.SaveInvalidatedDueToError || run.RunComplete || run.PlayerState == null) return;
+        var copy=run.DeepCopy();
+        Current=new Snapshot { Run=copy, Meta=save.GetMetaReadOnlyInMemory().DeepCopy() };
+        Instance.Log.LogInfo("Checkpoint captured ["+origin+"]: path="+copy.CurrentTunnelPath+", checkpoint="+copy.LastCheckpoint+", health="+copy.PlayerState.HealthData.CurrentHealth+"/"+copy.PlayerState.HealthData.MaxHealth);
     }
     [HarmonyPatch(typeof(S_SaveManager), "SnapshotAllInMemoryForSaveToStorage")]
-    class NativeCapture { static void Postfix() {
-        try { EnsureCheckpoint(true); } catch (Exception e) { Instance.Log.LogError(e); }
-    } }
-    [HarmonyPatch(typeof(ForesightChoiceEncounterUI), "OfferForesights")]
-    class ForesightCapture {
-        static void Prefix(ForesightChoiceEncounterUI __instance, ForesightBucketCategory category, int cardCount, bool resetToStartPositionOnEnd) {
-            var overrides = new Il2CppSystem.Collections.Generic.List<ForesightCardData>();
-            if (__instance._overrideRewards != null) foreach (var card in __instance._overrideRewards) overrides.Add(card);
-            Capture("先见奖励", new Reward { Name = __instance.name, Foresight = true, ForesightCategory = category, ForesightOverrides = overrides, Count = cardCount, Reset = resetToStartPositionOnEnd });
+    class CheckpointHook {
+        static void Postfix(S_SaveManager __instance) {
+            try { Capture(__instance,__instance.GetRunReadOnlyInMemory(),"game checkpoint"); }
+            catch(Exception e) { Instance.Log.LogError(e); }
+        }
+    }
+    // Capture the data handed to the native continuation flow, before gameplay mutates it.
+    [HarmonyPatch(typeof(S_BootManager), "LoadScene")]
+    class LoadHook {
+        static void Prefix(S_BootManager __instance) {
+            if(Restoring!=null) return;
+            Current=null; Failed=false;
+            try {
+                if(__instance.ContinueGame && __instance.SaveDataToLoad!=null)
+                    Capture(ServiceLocator.GetSystem<S_SaveManager>(),__instance.SaveDataToLoad,"continue game");
+            } catch(Exception e) { Instance.Log.LogError(e); }
         }
     }
     internal static void Retry() {
         try {
-            EnsureCheckpoint();
-            var boot = ServiceLocator.GetSystem<S_BootManager>();
-            var save = ServiceLocator.GetSystem<S_SaveManager>();
-            var p = Player();
-            if (Current == null || Restoring != null || boot == null || boot.BusyLoading || p == null || p.BusySavingInCheckpoint) return;
-            if (!boot.IsMainGameLoop() || save.GetRunReadOnlyInMemory().RunStatsId != Current.Run.RunStatsId) return;
+            var boot=ServiceLocator.GetSystem<S_BootManager>();
+            var save=ServiceLocator.GetSystem<S_SaveManager>();
+            var p=Player();
+            if(Failed || Current==null || Restoring!=null || boot==null || boot.BusyLoading || p==null || p.BusySavingInCheckpoint || save.HasUnsavedSnapshotPending()) return;
+            if(!boot.IsMainGameLoop() || save.GetRunReadOnlyInMemory().RunStatsId!=Current.Run.RunStatsId) return;
+            var target=Current.Run.GetLastSavedTunnelSceneReference();
+            if(target==null) throw new InvalidOperationException("Checkpoint scene is unavailable");
             ServiceLocator.GetSystem<S_PlayerValuesDisplay>().HidePauseMenu();
-            Current.SpawnApplied = false;
-            Restoring = Current;
-            Deadline = Time.realtimeSinceStartup + 60;
-            save._inMemoryRun = Current.Run.DeepCopy();
-            save._inMemoryMeta = Current.Meta.DeepCopy();
-            // Discard pending snapshots from the abandoned timeline.
-            save._inMemoryRunSnapshotJson = null;
-            save._inMemoryMetaSnapshotJson = null;
-            boot.ContinueGame = true;
-            boot.SaveDataToLoad = Current.Run.DeepCopy();
+            Restoring=Current; Restoring.LoadObserved=false;
+            Deadline=Time.realtimeSinceStartup+90;
+            save._inMemoryRun=Current.Run.DeepCopy();
+            save._inMemoryMeta=Current.Meta.DeepCopy();
+            boot.FirstTunnelSceneToLoad=target;
+            boot.ContinueGame=true;
+            boot.SaveDataToLoad=Current.Run.DeepCopy();
             boot.ReloadGameScene();
-            Instance.Log.LogInfo("SL reload requested: " + Current.Kind);
-        } catch (Exception e) { Restoring = null; Status = "SL 失败，请查看日志"; Instance.Log.LogError(e); }
+            Instance.Log.LogInfo("Native SL requested");
+        } catch(Exception e) { Failed=true; Restoring=null; Instance.Log.LogError(e); }
     }
-    [HarmonyPatch(typeof(CombatRoom), "OnEncounterTriggered")]
-    class CombatCapture { static void Prefix() { Capture("战斗"); } }
-    [HarmonyPatch(typeof(ExploreRoom), "OnEncounterTriggered")]
-    class ExploreCapture { static void Prefix() { Capture("探索"); } }
-    [HarmonyPatch(typeof(CardChoiceEncounterUI), "OfferCards")]
-    class RewardCapture {
-        static void Prefix(CardChoiceEncounterUI __instance, BucketCategoryBase category, int numberOfTimesCast, int maxCardCount, bool resetToStartPositionOnEnd) {
-            Capture("奖励选择", new Reward { Name = __instance.name, Category = category, Times = numberOfTimesCast, Count = maxCardCount, Reset = resetToStartPositionOnEnd });
-        }
-    }
-    [HarmonyPatch(typeof(CardChoiceEncounterUI), "OfferSpecificCards")]
-    class SpecificRewardCapture {
-        static void Prefix(CardChoiceEncounterUI __instance, Cards specificCards, Cards allReRollCardOptions, LocalizedFallbackText title, bool resetToStartPositionOnEnd, LocalizedFallbackText detailText) {
-            Capture("奖励选择", new Reward { Name = __instance.name, Specific = true, Cards = Copy(specificCards), Options = Copy(allReRollCardOptions), Title = title, Detail = detailText, Reset = resetToStartPositionOnEnd });
-        }
-        static Cards Copy(Cards source) { if (source == null) return null; var result = new Cards(); foreach (var card in source) result.Add(card); return result; }
-    }
-    [HarmonyPatch(typeof(TunnelGenerator), "GetCheckpointLoadInLocation")]
-    class SpawnOverride {
-        static void Postfix(TunnelGenerator __instance, ref SaveLoadCheckpoint.CheckpointSpawnInfo __result) {
-            if (Restoring == null || __result == null) return;
-            if (Restoring.NativeCheckpoint) { Restoring.SpawnApplied = true; return; }
-            __result.Position = __instance.transform.TransformPoint(Restoring.Position);
-            __result.Rotation = __instance.transform.rotation * Restoring.Rotation;
-            __result.CombatFinished = Restoring.CombatFinished;
-            Restoring.SpawnApplied = true;
-            Instance.Log.LogInfo("SL spawn position restored.");
+    [HarmonyPatch(typeof(RunSaveData), "GeneratePlayerClassFromSave")]
+    class PlayerLoadAudit {
+        static void Postfix(RunSaveData __instance, RuntimePlayerClass __result) {
+            if(Restoring==null) return;
+            Instance.Log.LogInfo("Native player load: source health="+__instance.PlayerState.HealthData.CurrentHealth+", generated health="+__result.PlayerState.HealthData.CurrentHealth);
+            Restoring.LoadObserved=true;
         }
     }
 }
-internal class Snapshot {
-    internal RunSaveData Run; internal MetaSaveData Meta;
-    internal string Kind; internal Vector3 Position; internal Quaternion Rotation;
-    internal bool NativeCheckpoint; internal bool CombatFinished; internal bool SpawnApplied; internal Reward Reward;
-}
-internal class Reward {
-    internal bool Foresight;
-    internal ForesightBucketCategory ForesightCategory;
-    internal Il2CppSystem.Collections.Generic.List<ForesightCardData> ForesightOverrides;
-    internal string Name; internal BucketCategoryBase Category;
-    internal int Times, Count; internal bool Reset, Specific;
-    internal Cards Cards, Options; internal LocalizedFallbackText Title, Detail;
-    internal void Open(CardChoiceEncounterUI ui) {
-        if (Specific) ui.OfferSpecificCards(Cards, Options, Title, Reset, Detail);
-        else ui.OfferCards(Category, Times, Count, Reset);
-    }
-}
+internal class Snapshot { internal RunSaveData Run; internal MetaSaveData Meta; internal bool LoadObserved; }
 public class PauseMenuSL : MonoBehaviour {
     Button button; TextMeshProUGUI label;
-    float readyAt;
-    float nextMenuAttempt;
+    float nextMenuAttempt, readyAt;
     bool menuHierarchyLogged;
-    public PauseMenuSL(IntPtr pointer) : base(pointer) { }
+    public PauseMenuSL(IntPtr pointer):base(pointer) {}
     public void Update() {
         try {
-            var display = ServiceLocator.GetSystem<S_PlayerValuesDisplay>();
-            if (display != null && display._pauseMenu != null && display.PauseMenuIsOpen()) {
-                Plugin.EnsureCheckpoint();
-                if (button == null) {
-                    if (Time.realtimeSinceStartup < nextMenuAttempt) return;
-                    nextMenuAttempt = Time.realtimeSinceStartup + 5;
-                    CreateButton(display._pauseMenu);
+            var display=ServiceLocator.GetSystem<S_PlayerValuesDisplay>();
+            if(display!=null && display._pauseMenu!=null && display.PauseMenuIsOpen()) {
+                if(button==null && Time.realtimeSinceStartup>=nextMenuAttempt) {
+                    nextMenuAttempt=Time.realtimeSinceStartup+5; CreateButton(display._pauseMenu);
                 }
-                label.text = "重开 SL";
-                button.interactable = Plugin.Current != null && Plugin.Restoring == null;
-            }
-            if (Plugin.Restoring == null) { readyAt = 0; return; }
-            if (Time.realtimeSinceStartup > Plugin.Deadline) {
-                Plugin.Restoring = null; readyAt = 0;
-                Plugin.Status = "SL 恢复超时，请查看日志";
-                Plugin.Instance.Log.LogError("SL timed out waiting for restored scene."); return;
-            }
-            var boot = ServiceLocator.GetSystem<S_BootManager>();
-            var p = Plugin.Player();
-            if (!Plugin.Restoring.SpawnApplied || boot == null || boot.BusyLoading || p == null || p.Model == null || p.BusySavingInCheckpoint) { readyAt = 0; return; }
-            if (readyAt == 0) { readyAt = Time.realtimeSinceStartup + 1; return; }
-            if (Time.realtimeSinceStartup < readyAt) return;
-            var reward = Plugin.Restoring.Reward;
-            if (reward != null && reward.Foresight) {
-                ForesightChoiceEncounterUI target = null;
-                foreach (var candidate in UnityEngine.Object.FindObjectsOfType<ForesightChoiceEncounterUI>(true)) {
-                    if (candidate.name != reward.Name) continue;
-                    if (target != null) throw new InvalidOperationException("Ambiguous foresight UI: " + reward.Name);
-                    target = candidate;
+                if(button!=null) {
+                    label.text=Plugin.Failed ? "SL 失败" : "重开 SL";
+                    button.interactable=Plugin.Current!=null && Plugin.Restoring==null && !Plugin.Failed;
                 }
-                if (target == null) throw new InvalidOperationException("Foresight UI not found: " + reward.Name);
-                target._overrideRewards = reward.ForesightOverrides;
-                target.OfferForesights(reward.ForesightCategory, reward.Count, reward.Reset);
-            } else if (reward != null) {
-                CardChoiceEncounterUI target = null;
-                foreach (var candidate in UnityEngine.Object.FindObjectsOfType<CardChoiceEncounterUI>(true)) {
-                    if (candidate.name != reward.Name) continue;
-                    if (target != null) throw new InvalidOperationException("Ambiguous reward UI: " + reward.Name);
-                    target = candidate;
-                }
-                if (target == null) throw new InvalidOperationException("Reward UI not found: " + reward.Name);
-                reward.Open(target);
             }
-            Plugin.Restoring = null; readyAt = 0;
-            Plugin.Instance.Log.LogInfo("SL restoration completed; playtest state correctness.");
-        } catch (Exception e) { Plugin.Restoring = null; Plugin.Status = "SL 失败，请查看日志"; Plugin.Instance.Log.LogError(e); }
+            if(Plugin.Restoring==null) { readyAt=0; return; }
+            if(Time.realtimeSinceStartup>Plugin.Deadline) throw new InvalidOperationException("Native restore timed out; no success assumed");
+            var boot=ServiceLocator.GetSystem<S_BootManager>();
+            var p=Plugin.Player();
+            if(!Plugin.Restoring.LoadObserved || boot==null || boot.BusyLoading || p==null || p.Model==null || p.BusySavingInCheckpoint) {readyAt=0;return;}
+            if(readyAt==0) {readyAt=Time.realtimeSinceStartup+1;return;}
+            if(Time.realtimeSinceStartup<readyAt)return;
+            var expected=Plugin.Restoring.Run.PlayerState.HealthData;
+            var actual=p.Model.GetSaveState().HealthData;
+            if(expected.CurrentHealth!=actual.CurrentHealth || expected.MaxHealth!=actual.MaxHealth)
+                throw new InvalidOperationException("Restored health mismatch: expected "+expected.CurrentHealth+"/"+expected.MaxHealth+", actual "+actual.CurrentHealth+"/"+actual.MaxHealth);
+            Plugin.Instance.Log.LogInfo("Native scene/player initialization and health verified; gameplay flow still needs validation");
+            Plugin.Restoring=null; readyAt=0;
+        } catch(Exception e) {Plugin.Failed=true;Plugin.Restoring=null;Plugin.Instance.Log.LogError(e);}
     }
     void CreateButton(GameObject menu) {
         var originals = new System.Collections.Generic.List<Button>();
