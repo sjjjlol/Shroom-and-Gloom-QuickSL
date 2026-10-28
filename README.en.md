@@ -2,9 +2,9 @@
 
 [简体中文](README.md) | **English**
 
-An unofficial Windows in-game retry plugin for **Shroom and Gloom**. Captures live state at combat, exploration, and card reward entry. Press **Esc**, then click **重开 SL** (Retry SL) on the right of the pause menu to restore without restarting the game process. The in-game button currently uses Chinese labels.
+An unofficial Windows in-game retry plugin for **Shroom and Gloom**. Captures live state at combat, exploration, and card reward entry. Press **Esc**, then click **重开 SL** (Retry SL) below Continue in the pause-menu button list to restore without restarting the game process. The in-game button currently uses Chinese labels.
 
-> **0.2.0 experimental**: replaces stale checkpoint copying with live state capture and adds a pause-menu button and reward restoration. Compilation has passed; first-combat placement, reward restoration and repeated retries still require playtesting.
+> **0.3.0 experimental**: adds foresight reward capture, native checkpoint fallback and an integrated pause-menu button. Compilation has passed; layout and restoration still require player verification.
 
 ## Installation
 
@@ -16,11 +16,11 @@ An unofficial Windows in-game retry plugin for **Shroom and Gloom**. Captures li
 
 ## Usage
 
-Press Esc and click the Retry SL button on the right. Its label identifies the latest captured stage: combat (战斗), exploration (探索), or rewards (奖励选择). It is disabled without a snapshot or during restoration. F8 has been removed.
+Press Esc and click **重开 SL** below Continue in the central button list. Combat, exploration and reward screens can all request restoration to the latest valid checkpoint. When no plugin snapshot exists, the native game checkpoint is used. Failed captures preserve the previous valid snapshot. Wait for scene loading or save writes to finish before retrying. F8 has been removed.
 
-Snapshots are taken before combat triggers, exploration begins, or reward choices open. Restoration rebuilds the scene and reopens the reward UI when needed. Fixed rewards retain their candidates; random rewards use the original offering logic again, with no guarantee that outcomes change.
+Snapshots are taken before combat triggers, exploration begins, or ordinary card / foresight reward choices open. Restoration rebuilds the scene and reopens the reward UI when needed. Fixed rewards retain their candidates; random rewards use the original offering logic again, with no guarantee that outcomes change.
 
-Snapshots are memory-only, disappear on exit, and are replaced at the next captured stage. This is not an arbitrary save-state system. Unserialized room interactions, statistics and achievements may not roll back. Reward costs, duplicate cards, first-combat restoration and later rooms need verification. Stop testing and report unexpected behavior.
+Plugin snapshots are memory-only and disappear on exit; after restarting, the native game checkpoint is used. New captured stages or native checkpoints replace older snapshots. This is not an arbitrary save-state system. Unserialized room interactions, statistics and achievements may not roll back. Reward costs, duplicate cards, first-combat restoration and later rooms need verification. Stop testing and report unexpected behavior.
 
 ## Uninstall and troubleshooting
 

@@ -2,14 +2,14 @@ using System;
 using BepInEx;
 using BepInEx.Unity.IL2CPP;
 using HarmonyLib;
-using Il2CppInterop.Runtime;
 using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
+using MathBad;
 using Cards = Il2CppSystem.Collections.Generic.List<GameplayCardData>;
 
 namespace ShroomQuickSL {
-[BepInPlugin("io.github.shroomquicksl", "Shroom Quick SL", "0.2.0")]
+[BepInPlugin("io.github.shroomquicksl", "Shroom Quick SL", "0.3.0")]
 public class Plugin : BasePlugin {
     internal static Plugin Instance;
     internal static Snapshot Current;
@@ -20,7 +20,7 @@ public class Plugin : BasePlugin {
         Instance = this;
         new Harmony("io.github.shroomquicksl").PatchAll();
         AddComponent<PauseMenuSL>();
-        Log.LogInfo("Quick SL 0.2.0 loaded. Open Esc menu to retry; F8 removed.");
+        Log.LogInfo("Quick SL 0.3.0 loaded. Open Esc menu to retry; F8 removed.");
     }
     internal static V_Player Player() { return UnityEngine.Object.FindObjectOfType<V_Player>(); }
     internal static void Capture(string kind, Reward reward = null) {
@@ -55,12 +55,38 @@ public class Plugin : BasePlugin {
             Status = "重开 SL · " + kind;
             Instance.Log.LogInfo("Captured live " + kind + " checkpoint: " + run.CurrentTunnelPath + ", " + run.LastCheckpoint);
         } catch (Exception e) {
-            Current = null; Status = "SL 快照失败，请查看日志";
+            Status = Current == null ? "重开 SL" : "重开 SL · " + Current.Kind;
             Instance.Log.LogError(e);
+        }
+    }
+    // Keep the last valid checkpoint even when a new capture cannot be made.
+    internal static void EnsureCheckpoint(bool replace = false) {
+        if (Restoring != null) return;
+        var save = ServiceLocator.GetSystem<S_SaveManager>();
+        if (save == null || !save.HasRunInMemory()) return;
+        var run = save.GetRunReadOnlyInMemory();
+        if (Current != null && Current.Run.RunStatsId != run.RunStatsId) Current = null;
+        if (!replace && Current != null) return;
+        if (run.SaveInvalidatedDueToError || run.RunComplete) return;
+        Current = new Snapshot { Run = run.DeepCopy(), Meta = save.GetMetaReadOnlyInMemory().DeepCopy(), Kind = "最近存档", NativeCheckpoint = true };
+        Status = "重开 SL";
+        Instance.Log.LogInfo("Native checkpoint captured: " + run.CurrentTunnelPath + ", " + run.LastCheckpoint);
+    }
+    [HarmonyPatch(typeof(S_SaveManager), "SnapshotAllInMemoryForSaveToStorage")]
+    class NativeCapture { static void Postfix() {
+        try { EnsureCheckpoint(true); } catch (Exception e) { Instance.Log.LogError(e); }
+    } }
+    [HarmonyPatch(typeof(ForesightChoiceEncounterUI), "OfferForesights")]
+    class ForesightCapture {
+        static void Prefix(ForesightChoiceEncounterUI __instance, ForesightBucketCategory category, int cardCount, bool resetToStartPositionOnEnd) {
+            var overrides = new Il2CppSystem.Collections.Generic.List<ForesightCardData>();
+            if (__instance._overrideRewards != null) foreach (var card in __instance._overrideRewards) overrides.Add(card);
+            Capture("先见奖励", new Reward { Name = __instance.name, Foresight = true, ForesightCategory = category, ForesightOverrides = overrides, Count = cardCount, Reset = resetToStartPositionOnEnd });
         }
     }
     internal static void Retry() {
         try {
+            EnsureCheckpoint();
             var boot = ServiceLocator.GetSystem<S_BootManager>();
             var save = ServiceLocator.GetSystem<S_SaveManager>();
             var p = Player();
@@ -102,6 +128,7 @@ public class Plugin : BasePlugin {
     class SpawnOverride {
         static void Postfix(TunnelGenerator __instance, ref SaveLoadCheckpoint.CheckpointSpawnInfo __result) {
             if (Restoring == null || __result == null) return;
+            if (Restoring.NativeCheckpoint) { Restoring.SpawnApplied = true; return; }
             __result.Position = __instance.transform.TransformPoint(Restoring.Position);
             __result.Rotation = __instance.transform.rotation * Restoring.Rotation;
             __result.CombatFinished = Restoring.CombatFinished;
@@ -113,9 +140,12 @@ public class Plugin : BasePlugin {
 internal class Snapshot {
     internal RunSaveData Run; internal MetaSaveData Meta;
     internal string Kind; internal Vector3 Position; internal Quaternion Rotation;
-    internal bool CombatFinished; internal bool SpawnApplied; internal Reward Reward;
+    internal bool NativeCheckpoint; internal bool CombatFinished; internal bool SpawnApplied; internal Reward Reward;
 }
 internal class Reward {
+    internal bool Foresight;
+    internal ForesightBucketCategory ForesightCategory;
+    internal Il2CppSystem.Collections.Generic.List<ForesightCardData> ForesightOverrides;
     internal string Name; internal BucketCategoryBase Category;
     internal int Times, Count; internal bool Reset, Specific;
     internal Cards Cards, Options; internal LocalizedFallbackText Title, Detail;
@@ -125,16 +155,18 @@ internal class Reward {
     }
 }
 public class PauseMenuSL : MonoBehaviour {
-    Button button; TextMeshProUGUI label;
+    ButtonUI button; TextMeshProUGUI label;
     float readyAt;
     public PauseMenuSL(IntPtr pointer) : base(pointer) { }
     public void Update() {
         try {
             var display = ServiceLocator.GetSystem<S_PlayerValuesDisplay>();
             if (display != null && display._pauseMenu != null && display.PauseMenuIsOpen()) {
+                Plugin.EnsureCheckpoint();
                 if (button == null) CreateButton(display._pauseMenu);
-                label.text = Plugin.Status;
-                button.interactable = Plugin.Current != null && Plugin.Restoring == null;
+                label.text = "重开 SL";
+                button._text = "重开 SL";
+                button._isDisabled = Plugin.Current == null || Plugin.Restoring != null;
             }
             if (Plugin.Restoring == null) { readyAt = 0; return; }
             if (Time.realtimeSinceStartup > Plugin.Deadline) {
@@ -148,7 +180,17 @@ public class PauseMenuSL : MonoBehaviour {
             if (readyAt == 0) { readyAt = Time.realtimeSinceStartup + 1; return; }
             if (Time.realtimeSinceStartup < readyAt) return;
             var reward = Plugin.Restoring.Reward;
-            if (reward != null) {
+            if (reward != null && reward.Foresight) {
+                ForesightChoiceEncounterUI target = null;
+                foreach (var candidate in UnityEngine.Object.FindObjectsOfType<ForesightChoiceEncounterUI>(true)) {
+                    if (candidate.name != reward.Name) continue;
+                    if (target != null) throw new InvalidOperationException("Ambiguous foresight UI: " + reward.Name);
+                    target = candidate;
+                }
+                if (target == null) throw new InvalidOperationException("Foresight UI not found: " + reward.Name);
+                target._overrideRewards = reward.ForesightOverrides;
+                target.OfferForesights(reward.ForesightCategory, reward.Count, reward.Reset);
+            } else if (reward != null) {
                 CardChoiceEncounterUI target = null;
                 foreach (var candidate in UnityEngine.Object.FindObjectsOfType<CardChoiceEncounterUI>(true)) {
                     if (candidate.name != reward.Name) continue;
@@ -163,21 +205,38 @@ public class PauseMenuSL : MonoBehaviour {
         } catch (Exception e) { Plugin.Restoring = null; Plugin.Status = "SL 失败，请查看日志"; Plugin.Instance.Log.LogError(e); }
     }
     void CreateButton(GameObject menu) {
-        var go = new GameObject("QuickSLButton", new Il2CppSystem.Type[] { Il2CppType.Of<RectTransform>() });
-        go.transform.SetParent(menu.transform, false);
-        var rect = go.GetComponent<RectTransform>();
-        rect.anchorMin = rect.anchorMax = new Vector2(0.78f, 0.5f);
-        rect.sizeDelta = new Vector2(330, 64); rect.anchoredPosition = Vector2.zero;
-        var image = go.AddComponent<Image>(); image.color = new Color(0.12f, 0.16f, 0.12f, 0.96f);
-        button = go.AddComponent<Button>(); button.targetGraphic = image;
+        var originals = new System.Collections.Generic.List<ButtonUI>();
+        foreach (var candidate in menu.GetComponentsInChildren<ButtonUI>(true)) {
+            if (candidate.gameObject.activeSelf) originals.Add(candidate);
+        }
+        if (originals.Count < 2) throw new InvalidOperationException("Pause menu button list not found");
+        originals.Sort((a,b) => b.transform.position.y.CompareTo(a.transform.position.y));
+        var first = originals[0];
+        var parent = first.transform.parent;
+        originals.RemoveAll(b => b.transform.parent != parent);
+        if (originals.Count < 2) throw new InvalidOperationException("Pause menu buttons do not share a container");
+        var firstRect = first.GetComponent<RectTransform>();
+        var lastRect = originals[originals.Count-1].GetComponent<RectTransform>();
+        float top = firstRect.anchoredPosition.y, bottom = lastRect.anchoredPosition.y;
+        float height = firstRect.rect.height;
+        var group = parent.GetComponent<VerticalLayoutGroup>();
+        if (group != null) group.enabled = false;
+        button = UnityEngine.Object.Instantiate<ButtonUI>(first, parent);
+        button.name = "QuickSLButton";
+        // Replace the complete UnityEvent, including serialized persistent actions.
+        button._onClick = new UnityEngine.Events.UnityEvent();
         button.onClick.AddListener((UnityEngine.Events.UnityAction)(Action)Plugin.Retry);
-        var textGo = new GameObject("Label", new Il2CppSystem.Type[] { Il2CppType.Of<RectTransform>() });
-        textGo.transform.SetParent(go.transform, false);
-        var tr = textGo.GetComponent<RectTransform>(); tr.anchorMin = Vector2.zero; tr.anchorMax = Vector2.one; tr.offsetMin = new Vector2(8, 4); tr.offsetMax = new Vector2(-8, -4);
-        label = textGo.AddComponent<TextMeshProUGUI>();
-        var sample = menu.GetComponentInChildren<TextMeshProUGUI>(true);
-        if (sample != null && sample != label) label.font = sample.font;
-        label.text = Plugin.Status; label.fontSize = 24; label.alignment = TextAlignmentOptions.Center; label.raycastTarget = false;
+        button._text = "重开 SL";
+        label = button.label; label.text = "重开 SL";
+        button.transform.SetSiblingIndex(first.transform.GetSiblingIndex() + 1);
+        originals.Insert(1, button);
+        float step = (top - bottom) / (originals.Count - 1);
+        for (int i = 0; i < originals.Count; i++) {
+            var rect = originals[i].GetComponent<RectTransform>();
+            rect.anchoredPosition = new Vector2(firstRect.anchoredPosition.x, top - i * step);
+            rect.SetSizeWithCurrentAnchors(RectTransform.Axis.Vertical, Mathf.Min(height, Mathf.Abs(step) * 0.82f));
+        }
+        Plugin.Instance.Log.LogInfo("SL button inserted after Continue in pause-menu list.");
     }
 }
 }
