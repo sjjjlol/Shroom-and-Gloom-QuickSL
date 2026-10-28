@@ -5,11 +5,10 @@ using HarmonyLib;
 using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
-using MathBad;
 using Cards = Il2CppSystem.Collections.Generic.List<GameplayCardData>;
 
 namespace ShroomQuickSL {
-[BepInPlugin("io.github.shroomquicksl", "Shroom Quick SL", "0.3.0")]
+[BepInPlugin("io.github.shroomquicksl", "Shroom Quick SL", "0.3.1")]
 public class Plugin : BasePlugin {
     internal static Plugin Instance;
     internal static Snapshot Current;
@@ -20,7 +19,7 @@ public class Plugin : BasePlugin {
         Instance = this;
         new Harmony("io.github.shroomquicksl").PatchAll();
         AddComponent<PauseMenuSL>();
-        Log.LogInfo("Quick SL 0.3.0 loaded. Open Esc menu to retry; F8 removed.");
+        Log.LogInfo("Quick SL 0.3.1 loaded. Open Esc menu to retry; F8 removed.");
     }
     internal static V_Player Player() { return UnityEngine.Object.FindObjectOfType<V_Player>(); }
     internal static void Capture(string kind, Reward reward = null) {
@@ -155,18 +154,23 @@ internal class Reward {
     }
 }
 public class PauseMenuSL : MonoBehaviour {
-    ButtonUI button; TextMeshProUGUI label;
+    Button button; TextMeshProUGUI label;
     float readyAt;
+    float nextMenuAttempt;
+    bool menuHierarchyLogged;
     public PauseMenuSL(IntPtr pointer) : base(pointer) { }
     public void Update() {
         try {
             var display = ServiceLocator.GetSystem<S_PlayerValuesDisplay>();
             if (display != null && display._pauseMenu != null && display.PauseMenuIsOpen()) {
                 Plugin.EnsureCheckpoint();
-                if (button == null) CreateButton(display._pauseMenu);
+                if (button == null) {
+                    if (Time.realtimeSinceStartup < nextMenuAttempt) return;
+                    nextMenuAttempt = Time.realtimeSinceStartup + 5;
+                    CreateButton(display._pauseMenu);
+                }
                 label.text = "重开 SL";
-                button._text = "重开 SL";
-                button._isDisabled = Plugin.Current == null || Plugin.Restoring != null;
+                button.interactable = Plugin.Current != null && Plugin.Restoring == null;
             }
             if (Plugin.Restoring == null) { readyAt = 0; return; }
             if (Time.realtimeSinceStartup > Plugin.Deadline) {
@@ -205,11 +209,21 @@ public class PauseMenuSL : MonoBehaviour {
         } catch (Exception e) { Plugin.Restoring = null; Plugin.Status = "SL 失败，请查看日志"; Plugin.Instance.Log.LogError(e); }
     }
     void CreateButton(GameObject menu) {
-        var originals = new System.Collections.Generic.List<ButtonUI>();
-        foreach (var candidate in menu.GetComponentsInChildren<ButtonUI>(true)) {
+        var originals = new System.Collections.Generic.List<Button>();
+        foreach (var candidate in menu.GetComponentsInChildren<Button>(true)) {
             if (candidate.gameObject.activeSelf) originals.Add(candidate);
         }
-        if (originals.Count < 2) throw new InvalidOperationException("Pause menu button list not found");
+        if (originals.Count < 2) {
+            if (!menuHierarchyLogged) {
+                menuHierarchyLogged = true;
+                foreach (var t in menu.GetComponentsInChildren<Transform>(true)) {
+                    string types = "";
+                    foreach (var c in t.GetComponents<Component>()) if (c != null) types += c.GetIl2CppType().FullName + ";";
+                    Plugin.Instance.Log.LogInfo("Pause UI: " + t.name + " [" + types + "]");
+                }
+            }
+            throw new InvalidOperationException("Native Unity pause buttons not found; hierarchy logged");
+        }
         originals.Sort((a,b) => b.transform.position.y.CompareTo(a.transform.position.y));
         var first = originals[0];
         var parent = first.transform.parent;
@@ -221,13 +235,14 @@ public class PauseMenuSL : MonoBehaviour {
         float height = firstRect.rect.height;
         var group = parent.GetComponent<VerticalLayoutGroup>();
         if (group != null) group.enabled = false;
-        button = UnityEngine.Object.Instantiate<ButtonUI>(first, parent);
+        button = UnityEngine.Object.Instantiate<Button>(first, parent);
         button.name = "QuickSLButton";
         // Replace the complete UnityEvent, including serialized persistent actions.
-        button._onClick = new UnityEngine.Events.UnityEvent();
+        button.onClick = new Button.ButtonClickedEvent();
         button.onClick.AddListener((UnityEngine.Events.UnityAction)(Action)Plugin.Retry);
-        button._text = "重开 SL";
-        label = button.label; label.text = "重开 SL";
+        label = button.GetComponentInChildren<TextMeshProUGUI>(true);
+        if (label == null) throw new InvalidOperationException("Cloned pause button has no TMP label");
+        label.text = "重开 SL";
         button.transform.SetSiblingIndex(first.transform.GetSiblingIndex() + 1);
         originals.Insert(1, button);
         float step = (top - bottom) / (originals.Count - 1);
